@@ -10,6 +10,9 @@ from github.GithubException import UnknownObjectException, GithubException
 RATE_BUFFER = 100
 EXTRA_WAIT = 60
 
+FORK_RETRY_WAIT = 60   # seconds to wait on secondary rate limit before retrying
+FORK_MAX_RETRIES = 5   # maximum number of retries for fork creation
+
 
 def check_rate_limiting(rl):
     remaining, total = rl._requester.rate_limiting
@@ -32,6 +35,41 @@ def check_rate_limiting(rl):
         print("\n")
 
 
+def create_fork_with_retry(dst_org, src_repo):
+    """Fork a repo, retrying with exponential backoff on secondary rate limit (403)."""
+    wait = FORK_RETRY_WAIT
+    for attempt in range(1, FORK_MAX_RETRIES + 1):
+        try:
+            return dst_org.create_fork(src_repo)
+        except GithubException as e:
+            data = e._GithubException__data
+            message = data.get("message", "") if isinstance(data, dict) else str(data)
+
+            if "contains no Git content" in message:
+                print("\n * Skipping empty repository", end="")
+                return None
+
+            if e.status == 403 and "submitted too quickly" in message:
+                if attempt < FORK_MAX_RETRIES:
+                    print(
+                        "\n * Secondary rate limit hit (attempt %d/%d). Waiting %ds before retrying..."
+                        % (attempt, FORK_MAX_RETRIES, wait),
+                        end="",
+                    )
+                    time.sleep(wait)
+                    wait *= 2  # exponential backoff
+                    continue
+                else:
+                    print(
+                        "\n * Secondary rate limit hit. Exhausted %d retries, skipping %s."
+                        % (FORK_MAX_RETRIES, src_repo.name),
+                        end="",
+                    )
+                    return None
+
+            raise e
+
+
 def mirror(token, src_org, dst_org, full_run=False):
     g = Github(token)
 
@@ -49,15 +87,7 @@ def mirror(token, src_org, dst_org, full_run=False):
 
         if not dst_repo:
             print("\n\nForking %s..." % src_repo.name, end="")
-            try:
-                response = dst_org.create_fork(src_repo)
-            except GithubException as e:
-                if "contains no Git content" in e._GithubException__data["message"]:
-                    # Hit an empty repo, which cannot be forked
-                    print("\n * Skipping empty repository", end="")
-                    continue
-                else:
-                    raise e
+            create_fork_with_retry(dst_org, src_repo)
 
         else:
             print("\n\nSyncing %s..." % src_repo.name, end="")
