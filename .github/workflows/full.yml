@@ -5,6 +5,7 @@ on:
     - cron: '0 0 * * 0'
 jobs:
   full-update:
+    environment: mirror-bak
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
